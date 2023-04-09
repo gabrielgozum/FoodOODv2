@@ -6,6 +6,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
+import torchvision
 import torchvision.transforms as trn
 import torchvision.datasets as dset
 import torch.nn.functional as F
@@ -24,10 +25,10 @@ if __package__ is None:
     import utils.lsun_loader as lsun_loader
     import utils.score_calculation as lib
 
-parser = argparse.ArgumentParser(description='Evaluates a CIFAR OOD Detector',
+parser = argparse.ArgumentParser(description='Evaluates a Food101 OOD Detector',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 # Setup
-parser.add_argument('--test_bs', type=int, default=200)
+parser.add_argument('--test_bs', type=int, default=128)
 parser.add_argument('--num_to_avg', type=int, default=1, help='Average measures across num_to_avg runs.')
 parser.add_argument('--validate', '-v', action='store_true', help='Evaluate performance on validation distributions.')
 parser.add_argument('--use_xent', '-x', action='store_true', help='Use cross entropy scoring instead of the MSP.')
@@ -50,47 +51,65 @@ print(args)
 # np.random.seed(1)
 
 # mean and standard deviation of channels of CIFAR-10 images
-mean = [x / 255 for x in [125.3, 123.0, 113.9]]
-std = [x / 255 for x in [63.0, 62.1, 66.7]]
+# mean = [x / 255 for x in [125.3, 123.0, 113.9]]
+# std = [x / 255 for x in [63.0, 62.1, 66.7]]
 
-test_transform = trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)])
+# mean and standard deviation of channels in Food-101 dataset
+mean = [0.485, 0.456, 0.406]
+std = [0.229, 0.224, 0.225]
 
-if 'cifar10_' in args.method_name:
-    test_data = dset.CIFAR10('../data/cifarpy', train=False, transform=test_transform)
-    num_classes = 10
-else:
-    test_data = dset.CIFAR100('../data/cifarpy', train=False, transform=test_transform)
-    num_classes = 100
+test_transform = trn.Compose([trn.Resize(255),trn.CenterCrop(224),trn.ToTensor(), trn.Normalize(mean, std)])
 
+# if 'cifar10_' in args.method_name:
+#     test_data = dset.CIFAR10('../data/cifarpy', train=False, transform=test_transform)
+#     num_classes = 10
+# else:
+#     test_data = dset.CIFAR100('../data/cifarpy', train=False, transform=test_transform)
+#     num_classes = 100
+
+test_data = dset.Food101(root="/nobackup/food101/", split='test', download=False, transform=test_transform)
+num_classes = 101
 
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=args.test_bs, shuffle=False,
-                                          num_workers=args.prefetch, pin_memory=True)
+                                          num_workers=0, pin_memory=True)
 
 # Create model
-net = WideResNet(args.layers, num_classes, args.widen_factor, dropRate=args.droprate)
+# net = WideResNet(args.layers, num_classes, args.widen_factor, dropRate=args.droprate)
+net = torchvision.models.resnet50(pretrained=False)
+net.fc = nn.Sequential( nn.Linear(2048, 101))
+
+state_dict = torch.load('./snapshots/oe_tune/_allconv_s1_oe_tune_epoch_11.pt')
+from collections import OrderedDict
+new_dict = OrderedDict()
+for key in state_dict:
+    new_dict[key[7:]] = state_dict[key]
+
+net.load_state_dict(new_dict)
+
+# net.load_state_dict(torch.load("./snapshots/oe_tune/_allconv_s1_oe_tune_epoch_11.pt"))
 
 start_epoch = 0
 
 # Restore model
-if args.load != '':
-    for i in range(1000 - 1, -1, -1):
-        if 'pretrained' in args.method_name:
-            subdir = 'pretrained'
-        elif 'oe_tune' in args.method_name:
-            subdir = 'oe_tune'
-        elif 'energy_ft' in args.method_name:
-            subdir = 'energy_ft'
-        else:
-            subdir = 'oe_scratch'
+# if args.load != '':
+#     for i in range(1000 - 1, -1, -1):
+#         if 'pretrained' in args.method_name:
+#             subdir = 'pretrained'
+#         elif 'oe_tune' in args.method_name:
+#             subdir = 'oe_tune'
+#         elif 'energy_ft' in args.method_name:
+#             subdir = 'energy_ft'
+#         else:
+#             subdir = 'oe_scratch'
         
-        model_name = os.path.join(os.path.join(args.load, subdir), args.method_name + '_epoch_' + str(i) + '.pt') 
-        if os.path.isfile(model_name):
-            net.load_state_dict(torch.load(model_name))
-            print('Model restored! Epoch:', i)
-            start_epoch = i + 1
-            break
-    if start_epoch == 0:
-        assert False, "could not resume "+model_name
+#         model_name = os.path.join(os.path.join(args.load, subdir), args.method_name + '_epoch_' + str(i) + '.pt') 
+#         if os.path.isfile(model_name):
+#             net.load_state_dict(torch.load(model_name))
+#             print('Model restored! Epoch:', i)
+#             start_epoch = i + 1
+#             break
+#     if start_epoch == 0:
+#         assert False, "could not resume "+model_name
 
 net.eval()
 
@@ -116,6 +135,8 @@ def get_ood_scores(loader, in_dist=False):
     _score = []
     _right_score = []
     _wrong_score = []
+
+    # import ipdb;ipdb.set_trace()
 
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(loader):
@@ -160,10 +181,11 @@ elif args.score == 'M':
     _, right_score, wrong_score = get_ood_scores(test_loader, in_dist=True)
 
 
-    if 'cifar10_' in args.method_name:
-        train_data = dset.CIFAR10('../data/cifarpy', train=True, transform=test_transform)
-    else:
-        train_data = dset.CIFAR100('../data/cifarpy', train=True, transform=test_transform)
+    # if 'cifar10_' in args.method_name:
+    #     train_data = dset.CIFAR10('../data/cifarpy', train=True, transform=test_transform)
+    # else:
+    #     train_data = dset.CIFAR100('../data/cifarpy', train=True, transform=test_transform)
+    train_data = dset.Food101(root='/nobackup/food101/', train=True, transform=test_transform)
 
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.test_bs, shuffle=False, 
                                           num_workers=args.prefetch, pin_memory=True)
@@ -193,7 +215,7 @@ print('Error Rate {:.2f}'.format(100 * num_wrong / (num_wrong + num_right)))
 
 # /////////////// End Detection Prelims ///////////////
 
-print('\nUsing CIFAR-10 as typical data') if num_classes == 10 else print('\nUsing CIFAR-100 as typical data')
+# print('\nUsing CIFAR-10 as typical data') if num_classes == 10 else print('\nUsing CIFAR-100 as typical data')
 
 # /////////////// Error Detection ///////////////
 
@@ -229,58 +251,70 @@ def get_and_print_results(ood_loader, num_to_avg=args.num_to_avg):
     else:
         print_measures(auroc, aupr, fpr, args.method_name)
 
-
-# /////////////// Textures ///////////////
-ood_data = dset.ImageFolder(root="../data/dtd/images",
-                            transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
-                                                   trn.ToTensor(), trn.Normalize(mean, std)]))
+# /////////////// Yelp OOD ////////////////
+test_transform = trn.Compose([trn.Resize(255),
+                                    trn.CenterCrop(224),
+                                    trn.ToTensor(),
+                                    trn.Normalize([0.485, 0.456, 0.406],
+                                                        [0.229, 0.224, 0.225])])
+ood_data = dset.ImageFolder(root='/nobackup/gozum/OOD_food/OOD-images-03042022/', transform=test_transform)
 ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                         num_workers=4, pin_memory=True)
+                                         num_workers=0, pin_memory=True)
 print('\n\nTexture Detection')
 get_and_print_results(ood_loader)
 
-# /////////////// SVHN /////////////// # cropped and no sampling of the test set
-ood_data = svhn.SVHN(root='../data/svhn/', split="test",
-                     transform=trn.Compose(
-                         [#trn.Resize(32), 
-                         trn.ToTensor(), trn.Normalize(mean, std)]), download=False)
-ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                         num_workers=2, pin_memory=True)
-print('\n\nSVHN Detection')
-get_and_print_results(ood_loader)
 
-# /////////////// Places365 ///////////////
-ood_data = dset.ImageFolder(root="../data/places365/",
-                            transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
-                                                   trn.ToTensor(), trn.Normalize(mean, std)]))
-ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                         num_workers=2, pin_memory=True)
-print('\n\nPlaces365 Detection')
-get_and_print_results(ood_loader)
+# # /////////////// Textures ///////////////
+# ood_data = dset.ImageFolder(root="../data/dtd/images",
+#                             transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
+#                                                    trn.ToTensor(), trn.Normalize(mean, std)]))
+# ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+#                                          num_workers=4, pin_memory=True)
+# print('\n\nTexture Detection')
+# get_and_print_results(ood_loader)
 
-# /////////////// LSUN-C ///////////////
-ood_data = dset.ImageFolder(root="../data/LSUN_C",
-                            transform=trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)]))
-ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                         num_workers=1, pin_memory=True)
-print('\n\nLSUN_C Detection')
-get_and_print_results(ood_loader)
+# # /////////////// SVHN /////////////// # cropped and no sampling of the test set
+# ood_data = svhn.SVHN(root='../data/svhn/', split="test",
+#                      transform=trn.Compose(
+#                          [#trn.Resize(32), 
+#                          trn.ToTensor(), trn.Normalize(mean, std)]), download=False)
+# ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+#                                          num_workers=2, pin_memory=True)
+# print('\n\nSVHN Detection')
+# get_and_print_results(ood_loader)
 
-# /////////////// LSUN-R ///////////////
-ood_data = dset.ImageFolder(root="../data/LSUN_resize",
-                            transform=trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)]))
-ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                         num_workers=1, pin_memory=True)
-print('\n\nLSUN_Resize Detection')
-get_and_print_results(ood_loader)
+# # /////////////// Places365 ///////////////
+# ood_data = dset.ImageFolder(root="../data/places365/",
+#                             transform=trn.Compose([trn.Resize(32), trn.CenterCrop(32),
+#                                                    trn.ToTensor(), trn.Normalize(mean, std)]))
+# ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+#                                          num_workers=2, pin_memory=True)
+# print('\n\nPlaces365 Detection')
+# get_and_print_results(ood_loader)
 
-# /////////////// iSUN ///////////////
-ood_data = dset.ImageFolder(root="../data/iSUN",
-                            transform=trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)]))
-ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
-                                         num_workers=1, pin_memory=True)
-print('\n\niSUN Detection')
-get_and_print_results(ood_loader)
+# # /////////////// LSUN-C ///////////////
+# ood_data = dset.ImageFolder(root="../data/LSUN_C",
+#                             transform=trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)]))
+# ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+#                                          num_workers=1, pin_memory=True)
+# print('\n\nLSUN_C Detection')
+# get_and_print_results(ood_loader)
+
+# # /////////////// LSUN-R ///////////////
+# ood_data = dset.ImageFolder(root="../data/LSUN_resize",
+#                             transform=trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)]))
+# ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+#                                          num_workers=1, pin_memory=True)
+# print('\n\nLSUN_Resize Detection')
+# get_and_print_results(ood_loader)
+
+# # /////////////// iSUN ///////////////
+# ood_data = dset.ImageFolder(root="../data/iSUN",
+#                             transform=trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)]))
+# ood_loader = torch.utils.data.DataLoader(ood_data, batch_size=args.test_bs, shuffle=True,
+#                                          num_workers=1, pin_memory=True)
+# print('\n\niSUN Detection')
+# get_and_print_results(ood_loader)
 
 # /////////////// Mean Results ///////////////
 
@@ -309,12 +343,16 @@ get_and_print_results(ood_loader)
 
 # /////////////// Arithmetic Mean of Images ///////////////
 
-if 'cifar10_' in args.method_name:
-    ood_data = dset.CIFAR100('../data/vision-greg/cifarpy', train=False, transform=test_transform)
-else:
-    ood_data = dset.CIFAR10('../data/vision-greg/cifarpy', train=False, transform=test_transform)
+# if 'cifar10_' in args.method_name:
+#     ood_data = dset.CIFAR100('../data/vision-greg/cifarpy', train=False, transform=test_transform)
+# else:
+#     ood_data = dset.CIFAR10('../data/vision-greg/cifarpy', train=False, transform=test_transform)
 
 
+ood_data = dset.ImageFolder(root='/nobackup/gozum/OOD_food/OOD-images-03042022/', transform=test_transform)
+
+#TODO: just commented everything out here
+'''
 class AvgOfPair(torch.utils.data.Dataset):
     def __init__(self, dataset):
         self.dataset = dataset
@@ -427,3 +465,5 @@ get_and_print_results(ood_loader)
 
 print('\n\nMean Validation Results')
 print_measures(np.mean(auroc_list), np.mean(aupr_list), np.mean(fpr_list), method_name=args.method_name)
+
+'''

@@ -7,7 +7,8 @@ import time
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
-import torchvision.transforms as trn
+import torchvision
+import torchvision.transforms as transforms
 import torchvision.datasets as dset
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -21,16 +22,17 @@ if __package__ is None:
     from utils.tinyimages_80mn_loader import TinyImages
     from utils.validation_dataset import validation_split
 
-parser = argparse.ArgumentParser(description='Tunes a CIFAR Classifier with OE',
+parser = argparse.ArgumentParser(description='Tunes a Food101 Classifier with OE',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('dataset', type=str, choices=['cifar10', 'cifar100'],
-                    help='Choose between CIFAR-10, CIFAR-100.')
+# parser.add_argument('dataset', type=str, choices=['cifar10', 'cifar100'],
+#                     help='Choose between CIFAR-10, CIFAR-100.')
 parser.add_argument('--model', '-m', type=str, default='allconv',
                     choices=['allconv', 'wrn', 'densenet'], help='Choose architecture.')
 parser.add_argument('--calibration', '-c', action='store_true',
                     help='Train a model to be used for calibration. This holds out some data for validation.')
 # Optimization options
 parser.add_argument('--epochs', '-e', type=int, default=10, help='Number of epochs to train.')
+# parser.add_argument('--learning_rate', '-lr', type=float, default=0.001, help='The initial learning rate.')
 parser.add_argument('--learning_rate', '-lr', type=float, default=0.001, help='The initial learning rate.')
 parser.add_argument('--batch_size', '-b', type=int, default=128, help='Batch size.')
 parser.add_argument('--oe_batch_size', type=int, default=256, help='Batch size.')
@@ -43,7 +45,8 @@ parser.add_argument('--widen-factor', default=2, type=int, help='widen factor')
 parser.add_argument('--droprate', default=0.3, type=float, help='dropout probability')
 # Checkpoints
 parser.add_argument('--save', '-s', type=str, default='./snapshots/', help='Folder to save checkpoints.')
-parser.add_argument('--load', '-l', type=str, default='./snapshots/pretrained', help='Checkpoint path to resume / test.')
+# parser.add_argument('--load', '-l', type=str, default='./snapshots/pretrained', help='Checkpoint path to resume / test.')
+parser.add_argument('--load', '-l', type=str, default='', help='Checkpoint path to resume / test.')
 parser.add_argument('--test', '-t', action='store_true', help='Test only flag.')
 # Acceleration
 parser.add_argument('--ngpu', type=int, default=1, help='0 = CPU.')
@@ -71,22 +74,39 @@ torch.manual_seed(1)
 np.random.seed(args.seed)
 
 # mean and standard deviation of channels of CIFAR-10 images
-mean = [x / 255 for x in [125.3, 123.0, 113.9]]
-std = [x / 255 for x in [63.0, 62.1, 66.7]]
+# mean = [x / 255 for x in [125.3, 123.0, 113.9]]
+# std = [x / 255 for x in [63.0, 62.1, 66.7]]
 
-train_transform = trn.Compose([trn.RandomHorizontalFlip(), trn.RandomCrop(32, padding=4),
-                               trn.ToTensor(), trn.Normalize(mean, std)])
-test_transform = trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)])
+# train_transform = trn.Compose([trn.RandomHorizontalFlip(), trn.RandomCrop(32, padding=4),
+#                                trn.ToTensor(), trn.Normalize(mean, std)])
 
-if args.dataset == 'cifar10':
-    train_data_in = dset.CIFAR10('../data/cifarpy', train=True, transform=train_transform)
-    test_data = dset.CIFAR10('../data/cifarpy', train=False, transform=test_transform)
-    num_classes = 10
-else:
-    train_data_in = dset.CIFAR100('../data/cifarpy', train=True, transform=train_transform)
-    test_data = dset.CIFAR100('../data/cifarpy', train=False, transform=test_transform)
-    num_classes = 100
+train_transform = transforms.Compose([transforms.RandomRotation(30),
+                                    transforms.RandomResizedCrop(224),
+                                    transforms.RandomHorizontalFlip(),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize([0.485, 0.456, 0.406],
+                                                            [0.229, 0.224, 0.225])])
 
+# test_transform = trn.Compose([trn.ToTensor(), trn.Normalize(mean, std)])
+
+test_transform = transforms.Compose([transforms.Resize(255),
+                                    transforms.CenterCrop(224),
+                                    transforms.ToTensor(),
+                                    transforms.Normalize([0.485, 0.456, 0.406],
+                                                        [0.229, 0.224, 0.225])])
+
+# if args.dataset == 'cifar10':
+#     train_data_in = dset.CIFAR10('../data/cifarpy', train=True, transform=train_transform)
+#     test_data = dset.CIFAR10('../data/cifarpy', train=False, transform=test_transform)
+#     num_classes = 10
+# else:
+#     train_data_in = dset.CIFAR100('../data/cifarpy', train=True, transform=train_transform)
+#     test_data = dset.CIFAR100('../data/cifarpy', train=False, transform=test_transform)
+#     num_classes = 100
+
+train_data_in = dset.Food101(root="/nobackup/food101/", split='train', download=False, transform=train_transform)
+test_data = dset.Food101(root="/nobackup/food101/", split='test', download=False, transform=test_transform)
+num_classes = 101
 
 calib_indicator = ''
 if args.calibration:
@@ -94,9 +114,15 @@ if args.calibration:
     calib_indicator = '_calib'
 
 
-ood_data = TinyImages(transform=trn.Compose(
-    [trn.ToTensor(), trn.ToPILImage(), trn.RandomCrop(32, padding=4),
-     trn.RandomHorizontalFlip(), trn.ToTensor(), trn.Normalize(mean, std)]))
+# ood_data = TinyImages(transform=trn.Compose(
+#     [trn.ToTensor(), trn.ToPILImage(), trn.RandomCrop(32, padding=4),
+#      trn.RandomHorizontalFlip(), trn.ToTensor(), trn.Normalize(mean, std)]))
+
+# create a loader for the out-of-distribution data, the images are located in /nobackup/gozum/OOD_food/OOD-images-03042022/
+# and set all labels to a default class (1). Grab all images in all subfolders.
+ood_data = dset.ImageFolder(root='/nobackup/gozum/OOD_food/OOD-images-03042022/', transform=test_transform)
+
+# print(f"OOD data {ood_data}")
 
 train_loader_in = torch.utils.data.DataLoader(
     train_data_in,
@@ -114,7 +140,20 @@ test_loader = torch.utils.data.DataLoader(
     num_workers=args.prefetch, pin_memory=True)
 
 # Create model
-net = WideResNet(args.layers, num_classes, args.widen_factor, dropRate=args.droprate)
+# net = WideResNet(args.layers, num_classes, args.widen_factor, dropRate=args.droprate)
+net = torchvision.models.resnet50(pretrained=False)
+net.fc = nn.Sequential( nn.Linear(2048, 101))
+
+# hack to get around the fact that the model was saved with DataParallel
+state_dict = torch.load('/u/g/o/gozum/private/cs766/RobustFoodDetector/saved_models/resnet_distributed_OE.pth')
+from collections import OrderedDict
+new_dict = OrderedDict()
+for key in state_dict:
+    new_dict[key[7:]] = state_dict[key]
+
+net.load_state_dict(new_dict)
+
+# print(f'Network: {net}')
 
 def recursion_change_bn(module):
     if isinstance(module, torch.nn.BatchNorm2d):
@@ -129,7 +168,8 @@ model_found = False
 if args.load != '':
     for i in range(1000 - 1, -1, -1):
         
-        model_name = os.path.join(args.load, args.dataset + calib_indicator + '_' + args.model +
+        # model_name = os.path.join(args.load, args.dataset + calib_indicator + '_' + args.model +
+        model_name = os.path.join(args.load, calib_indicator + '_' + args.model +
                                   '_pretrained_epoch_' + str(i) + '.pt')
         if os.path.isfile(model_name):
             net.load_state_dict(torch.load(model_name))
@@ -216,6 +256,7 @@ def test():
 
             # forward
             output = net(data)
+            # import ipdb; ipdb.set_trace()
             loss = F.cross_entropy(output, target)
 
             # accuracy
@@ -240,7 +281,8 @@ if not os.path.exists(args.save):
 if not os.path.isdir(args.save):
     raise Exception('%s is not a dir' % args.save)
 
-with open(os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+# with open(os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+with open(os.path.join(args.save, calib_indicator + '_' + args.model + '_s' + str(args.seed) +
                                   '_' + save_info+'_training_results.csv'), 'w') as f:
     f.write('epoch,time(s),train_loss,test_loss,test_error(%)\n')
 
@@ -257,16 +299,19 @@ for epoch in range(0, args.epochs):
  
     # Save model
     torch.save(net.state_dict(),
-               os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+            #    os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+               os.path.join(args.save, calib_indicator + '_' + args.model + '_s' + str(args.seed) +
                             '_' + save_info + '_epoch_' + str(epoch) + '.pt'))
     
                # Let us not waste space and delete the previous model
-    prev_path = os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+    # prev_path = os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+    prev_path = os.path.join(args.save, calib_indicator + '_' + args.model + '_s' + str(args.seed) +
                              '_' + save_info + '_epoch_'+ str(epoch - 1) + '.pt')
     if os.path.exists(prev_path): os.remove(prev_path)
 
     # Show results
-    with open(os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+    # with open(os.path.join(args.save, args.dataset + calib_indicator + '_' + args.model + '_s' + str(args.seed) +
+    with open(os.path.join(args.save, calib_indicator + '_' + args.model + '_s' + str(args.seed) +
                                       '_' + save_info + '_training_results.csv'), 'a') as f:
         f.write('%03d,%05d,%0.6f,%0.5f,%0.2f\n' % (
             (epoch + 1),
